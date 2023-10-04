@@ -123,7 +123,6 @@ def handle_product_addition(update: Update, context: CallbackContext) -> None:
                     add_product_to_db(action_data['name'], action_data['price'], product_file)
                     sent_message = update.message.reply_text(config['messages']['product_added'])
                     
-                    # Delete all previous messages
                     for msg_id in messages_to_delete:
                         try:
                             context.bot.delete_message(chat_id=user_id, message_id=msg_id)
@@ -134,13 +133,15 @@ def handle_product_addition(update: Update, context: CallbackContext) -> None:
                     except BadRequest:
                         pass
                     
-                    show_admin_panel(Update(effective_message=update.message, update_id=0), context)
+                    show_admin_panel(update, context)
                     
                     del pending_actions[user_id]
                 else:
                     update.message.reply_text(config['messages']['invalid_file_type'])
             else:
                 update.message.reply_text(config['messages']['no_document_attached'])
+
+
             
 def buy_product(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -230,8 +231,8 @@ def show_profile(update: Update, context: CallbackContext) -> None:
         query.edit_message_text(config['messages']['error_fetching_profile'])
 
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    user_id = query.message.chat_id
+    query = update.callback_query if update.callback_query else None
+    user_id = update.message.chat_id if update.message else (query.message.chat_id if query else None)
     if is_admin(user_id):
         admin_keyboard = [
             [InlineKeyboardButton(config['buttons']['add_product'], callback_data='add_product')],
@@ -241,9 +242,13 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         if user_id == config['owner_id']:
             admin_keyboard.append([InlineKeyboardButton(config['buttons']['show_admin_list'], callback_data='show_admin_list')])
         admin_markup = InlineKeyboardMarkup(admin_keyboard)
-        query.edit_message_text(config['messages']['admin_panel_title'], reply_markup=admin_markup)
+        if query:
+            query.edit_message_text(config['messages']['admin_panel_title'], reply_markup=admin_markup)
+        else:
+            context.bot.send_message(chat_id=user_id, text=config['messages']['admin_panel_title'], reply_markup=admin_markup)
     else:
-        query.answer(config['messages']['you_do_not_have_permission_to_access'])
+        if query:
+            query.answer(config['messages']['you_do_not_have_permission_to_access'])
 
 
 def back_to_profile(update: Update, context: CallbackContext) -> None:
@@ -351,14 +356,21 @@ def add_wallet_address(update: Update, context: CallbackContext) -> None:
 def handle_pending_actions(update: Update, context: CallbackContext) -> None:
     user_id = update.message.chat_id
     action_data = pending_actions.get(user_id)
+    
     if action_data:
         action = action_data['action']
-        if action == 'add_wallet_address':
+        
+        if action == 'add_product_name' or action == 'add_product_price' or action == 'add_product_file':
+            handle_product_addition(update, context)
+        elif action == 'add_new_admin':
+            add_admin(update, context)
+        elif action == 'add_wallet_address':
             btc_wallet = update.message.text
             db_action("UPDATE profiles SET btc_wallet = ? WHERE user_id = ?", (btc_wallet, user_id))
             del pending_actions[user_id]
             update.message.reply_text(config['messages']['btc_wallet_added'])
             show_profile(Update(effective_message=update.message, update_id=0), context)
+
 
 
 btc_wallet_address = config.get('btc_wallet_address', '')
@@ -430,7 +442,7 @@ def main() -> None:
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command | Filters.document.mime_type("text/plain") & ~Filters.command, handle_pending_actions))
+    dp.add_handler(MessageHandler((Filters.text | Filters.document.mime_type("text/plain")) & ~Filters.command, handle_pending_actions))
     dp.add_handler(CallbackQueryHandler(buy_product, pattern='^buy_\\d+$'))
     dp.add_handler(CallbackQueryHandler(view_shop, pattern='^view_shop$'))
     dp.add_handler(CallbackQueryHandler(add_product, pattern='^add_product$'))
