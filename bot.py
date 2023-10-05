@@ -8,12 +8,10 @@ import sqlite3
 import threading
 import yaml
 
-# Function to read YAML configuration file
 def read_yaml_config(filename):
     with open(filename, 'r') as file:
         return yaml.safe_load(file)
 
-# Reading configuration from 'config.yml'
 config = read_yaml_config('config.yml')
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -88,8 +86,6 @@ def view_shop(update: Update, context: CallbackContext) -> None:
         if query.message.text != config['messages']['no_products_available']:
             query.edit_message_text(config['messages']['no_products_available'], reply_markup=markup)
 
-
-
 def add_product(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user_id = query.message.chat_id
@@ -133,15 +129,11 @@ def handle_product_addition(update: Update, context: CallbackContext) -> None:
                     except BadRequest:
                         pass
                     
-                    show_admin_panel(update, context)
-                    
                     del pending_actions[user_id]
                 else:
                     update.message.reply_text(config['messages']['invalid_file_type'])
             else:
                 update.message.reply_text(config['messages']['no_document_attached'])
-
-
             
 def buy_product(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -207,8 +199,12 @@ def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(welcome_message, reply_markup=markup)
 
 def show_profile(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    user_id = query.message.chat_id
+    query = update.callback_query if update.callback_query else None
+    user_id = update.message.chat_id if update.message else (query.message.chat_id if query else None)
+    
+    if not user_id:
+        return
+    
     profile = db_action("SELECT username, balance, notifications_enabled, btc_wallet FROM profiles WHERE user_id = ?", (user_id,))
     if profile:
         username, balance, notifications_enabled, btc_wallet = profile[0]
@@ -221,14 +217,21 @@ def show_profile(update: Update, context: CallbackContext) -> None:
         ]
         if btc_wallet:
             keyboard.insert(0, [InlineKeyboardButton(config['buttons']['deposit'], callback_data='deposit')])
-        if not btc_wallet:
+        else:
             keyboard.append([InlineKeyboardButton(config['buttons']['add_wallet_address'], callback_data='add_wallet_address')])
+
         if is_admin(user_id):
             keyboard.append([InlineKeyboardButton(config['buttons']['admin_panel'], callback_data='admin_panel')])
         markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text(profile_info, reply_markup=markup)
+        if query:
+            query.edit_message_text(profile_info, reply_markup=markup)
+        else:
+            context.bot.send_message(chat_id=user_id, text=profile_info, reply_markup=markup)
     else:
-        query.edit_message_text(config['messages']['error_fetching_profile'])
+        if query:
+            query.edit_message_text(config['messages']['error_fetching_profile'])
+        else:
+            context.bot.send_message(chat_id=user_id, text=config['messages']['error_fetching_profile'])
 
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
     query = update.callback_query if update.callback_query else None
@@ -250,7 +253,6 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         if query:
             query.answer(config['messages']['you_do_not_have_permission_to_access'])
 
-
 def back_to_profile(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     show_profile(update, context)
@@ -268,14 +270,15 @@ def toggle_notifications(update: Update, context: CallbackContext) -> None:
     else:
         query.answer(config['messages']['an_error_occurred'])
 
-
 def back_to_main_menu(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
-    user_id = query.message.chat_id
-    profile = db_action("SELECT username FROM profiles WHERE user_id = ?", (user_id,))
+    user_id = query.message.chat_id if query and query.message else None  # Verifica que query no sea None
+    if user_id is None:
+        return
+    profile = db_action("SELECT username, balance FROM profiles WHERE user_id = ?", (user_id,)) 
     if profile:
-        username, = profile[0]
-        welcome_message = config['messages']['welcome_back_message'].format(username=username)
+        username, balance = profile[0]  
+        welcome_message = config['messages']['welcome_back_message'].format(username=username, balance=balance)
         keyboard = [
             [InlineKeyboardButton(config['buttons']['view_profile'], callback_data='view_profile'), InlineKeyboardButton(config['buttons']['view_shop'], callback_data='view_shop')]
         ]
@@ -300,11 +303,28 @@ def add_admin(update: Update, context: CallbackContext) -> None:
     if action_data and action_data['action'] == 'add_new_admin':
         new_admin_id = int(update.message.text)
         add_admin_to_db(new_admin_id)
-        refresh_admin_ids()  # Assuming this function refreshes the admin_ids global variable
-        update.message.reply_text(config['messages']['admin_added'].format(new_admin_id=new_admin_id))
+        refresh_admin_ids()  # Actualiza la lista de IDs de administradores
+
+        messages_to_delete = action_data.get('messages_to_delete', [])
+        messages_to_delete.append(update.message.message_id)
+        sent_message = update.message.reply_text(config['messages']['admin_added'].format(new_admin_id=new_admin_id))
+        messages_to_delete.append(sent_message.message_id)
+
+        for msg_id in messages_to_delete:
+            try:
+                context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+            except BadRequest:
+                pass
+
+        try:
+            context.bot.delete_message(chat_id=user_id, message_id=sent_message.message_id)
+        except BadRequest:
+            pass
+
         del pending_actions[user_id]
     else:
         update.message.reply_text(config['messages']['you_do_not_have_permission_to_add_admin'])
+
 
 def revoke_admin(admin_id):
     db_action("DELETE FROM admins WHERE admin_id = ?", (admin_id,))
@@ -323,7 +343,6 @@ def show_admin_list(update: Update, context: CallbackContext) -> None:
         markup = InlineKeyboardMarkup(keyboard)
         query.edit_message_text(config['messages']['admin_list_title'], reply_markup=markup)
 
-
 def revoke_admin_permission(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user_id = query.message.chat_id
@@ -334,31 +353,29 @@ def revoke_admin_permission(update: Update, context: CallbackContext) -> None:
         query.answer(config['messages']['revoked_admin_permission'].format(admin_id_to_revoke=admin_id_to_revoke))
         show_admin_list(update, context)
 
-def handle_pending_actions(update: Update, context: CallbackContext) -> None:
-    user_id = update.message.chat_id
-    action_data = pending_actions.get(user_id)
-    
-    if action_data:
-        action = action_data['action']
-        
-        if action == 'add_product_name' or action == 'add_product_price' or action == 'add_product_file':
-            handle_product_addition(update, context)
-        elif action == 'add_new_admin':
-            add_admin(update, context)
-
 def add_wallet_address(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user_id = query.message.chat_id
-    sent_message = query.message.reply_text(config['messages']['please_send_btc_wallet'])
-    pending_actions[user_id] = {'action': 'add_wallet_address', 'messages_to_delete': [sent_message.message_id]}
-
+    user_data = db_action("SELECT btc_wallet FROM profiles WHERE user_id = ?", (user_id,))
+    if user_data and user_data[0][0]:
+        query.answer(config['messages']['wallet_already_added'])
+        back_to_main_menu(update, context)
+    else:
+        sent_message = query.message.reply_text(config['messages']['please_send_btc_wallet'])
+        pending_actions[user_id] = {'action': 'add_wallet_address', 'messages_to_delete': [sent_message.message_id]}
 
 def handle_pending_actions(update: Update, context: CallbackContext) -> None:
     user_id = update.message.chat_id
+    
+    if not user_id:
+        return
+    
     action_data = pending_actions.get(user_id)
     
     if action_data:
         action = action_data['action']
+        messages_to_delete = action_data.get('messages_to_delete', [])
+        messages_to_delete.append(update.message.message_id)        
         
         if action == 'add_product_name' or action == 'add_product_price' or action == 'add_product_file':
             handle_product_addition(update, context)
@@ -367,11 +384,25 @@ def handle_pending_actions(update: Update, context: CallbackContext) -> None:
         elif action == 'add_wallet_address':
             btc_wallet = update.message.text
             db_action("UPDATE profiles SET btc_wallet = ? WHERE user_id = ?", (btc_wallet, user_id))
+            
+            sent_message = update.message.reply_text(config['messages']['btc_wallet_added'])
+            messages_to_delete.append(sent_message.message_id)
+            
+            for msg_id in messages_to_delete:
+                try:
+                    context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                except BadRequest:
+                    pass
+
+            if update.callback_query:
+                try:
+                    context.bot.delete_message(chat_id=user_id, message_id=update.callback_query.message.message_id)
+                except BadRequest:
+                    pass
+
             del pending_actions[user_id]
-            update.message.reply_text(config['messages']['btc_wallet_added'])
-            show_profile(Update(effective_message=update.message, update_id=0), context)
-
-
+            
+            back_to_main_menu(update, context)
 
 btc_wallet_address = config.get('btc_wallet_address', '')
 
@@ -385,7 +416,6 @@ def show_deposit_menu(update: Update, context: CallbackContext) -> None:
     ]
     markup = InlineKeyboardMarkup(keyboard)
     query.edit_message_text(deposit_message, reply_markup=markup)
-
 
 def verify_transaction(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -405,7 +435,6 @@ def verify_transaction(update: Update, context: CallbackContext) -> None:
     else:
         query.answer("An error occurred.")
     show_profile(update, context)  
-
 
 verified_tx_hashes = set()
 
