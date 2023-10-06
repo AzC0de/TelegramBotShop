@@ -240,6 +240,7 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         admin_keyboard = [
             [InlineKeyboardButton(config['buttons']['add_product'], callback_data='add_product')],
             [InlineKeyboardButton(config['buttons']['add_new_admin'], callback_data='add_new_admin')],
+            [InlineKeyboardButton(config['buttons']['show_products_list'], callback_data='show_products_list')],  # Nuevo botón
             [InlineKeyboardButton(config['buttons']['back_to_profile'], callback_data='view_profile')]
         ]
         if user_id == config['owner_id']:
@@ -410,16 +411,35 @@ def show_deposit_menu(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user_id = query.message.chat_id
     deposit_message = config['messages']['deposit_message'].format(btc_wallet_address=btc_wallet_address)
+    
     keyboard = [
         [InlineKeyboardButton(config['buttons']['verify_transaction'], callback_data='verify_transaction')],
-        [InlineKeyboardButton(config['buttons']['back_to_profile'], callback_data='view_profile')]
+        [InlineKeyboardButton(config['buttons']['back_to_profile'], callback_data='view_profile')],
+        [InlineKeyboardButton(config['buttons']['copy_btc_address'], callback_data='copy_btc_address')]
     ]
+    
     markup = InlineKeyboardMarkup(keyboard)
     query.edit_message_text(deposit_message, reply_markup=markup)
+
+btc_message_ids = {}
+def copy_btc_address(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    sent_message = context.bot.send_message(chat_id=user_id, text=btc_wallet_address)
+    btc_message_ids[user_id] = sent_message.message_id  # Almacenar el message_id
+    query.answer(config['messages']['btc_address_sent'])
 
 def verify_transaction(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user_id = query.message.chat_id
+    
+    if user_id in btc_message_ids:
+        try:
+            context.bot.delete_message(chat_id=user_id, message_id=btc_message_ids[user_id])
+        except BadRequest:
+            pass
+        del btc_message_ids[user_id]  
+    
     user_data = db_action("SELECT btc_wallet FROM profiles WHERE user_id = ?", (user_id,))
     if user_data:
         user_wallet = user_data[0][0]
@@ -431,9 +451,9 @@ def verify_transaction(update: Update, context: CallbackContext) -> None:
             db_action("UPDATE profiles SET balance = balance + ? WHERE user_id = ?", (amount_in_usd, user_id))
             query.answer(config['messages']['transaction_verified'].format(amount_in_usd=amount_in_usd))
         else:
-            query.answer("No transaction found in the last hour.")
+            query.answer(config['messages']['no_transaction_found'])
     else:
-        query.answer("An error occurred.")
+        query.answer(config['messages']['error_occurred'])
     show_profile(update, context)  
 
 verified_tx_hashes = set()
@@ -466,6 +486,72 @@ def check_btc_transaction(user_wallet, destination_wallet):
                         return amount_in_btc 
     return None
 
+
+def show_products_list(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    if is_admin(user_id):
+        products = fetch_products()
+        if products:
+            keyboard = [
+                [InlineKeyboardButton(f"{name} - ${price}", callback_data=f'product_options_{id}')] 
+                for id, name, price in products
+            ]
+            keyboard.append([InlineKeyboardButton(config['buttons']['back_to_admin_panel'], callback_data='admin_panel')])
+            markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text(config['messages']['products_list'], reply_markup=markup)
+        else:
+            keyboard = [[InlineKeyboardButton(config['buttons']['back_to_admin_panel'], callback_data='admin_panel')]]
+            markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text(config['messages']['no_products_available'], reply_markup=markup)
+
+
+def product_options(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    product_id = int(query.data.split('_')[2])
+    product_data = db_action("SELECT name, file FROM products WHERE id = ?", (product_id,))
+    product_name, file_id = product_data[0]
+    
+    if is_admin(user_id):
+        keyboard = [
+            [InlineKeyboardButton(config['buttons']['download_file'], callback_data=f'download_{product_id}')],
+            [InlineKeyboardButton(config['buttons']['delete_product'], callback_data=f'delete_{product_id}')],
+            [InlineKeyboardButton(config['buttons']['back_to_products_list'], callback_data='show_products_list')]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text(f"Options for {product_name}:", reply_markup=markup)
+
+def download_file(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    product_id = int(query.data.split('_')[1])
+    product_data = db_action("SELECT file FROM products WHERE id = ?", (product_id,))
+    file_id = product_data[0][0]
+    context.bot.send_document(chat_id=user_id, document=file_id)
+    query.answer("File sent.")
+
+def delete_product(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    product_id = int(query.data.split('_')[1])
+    
+    keyboard = [
+        [InlineKeyboardButton(config['buttons']['confirm_delete'], callback_data=f'confirm_delete_{product_id}')],
+        [InlineKeyboardButton(config['buttons']['cancel_delete'], callback_data='show_products_list')]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    query.edit_message_text("Are you sure you want to delete this product?", reply_markup=markup)
+
+def confirm_delete_product(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = query.message.chat_id
+    product_id = int(query.data.split('_')[2])
+    db_action("DELETE FROM products WHERE id = ?", (product_id,))
+    query.answer("Product deleted.")
+    show_products_list(update, context)
+
+
 def main() -> None:
     updater = Updater(telegram_token)
     dp = updater.dispatcher
@@ -474,6 +560,12 @@ def main() -> None:
     dp.add_handler(MessageHandler((Filters.text | Filters.document.mime_type("text/plain")) & ~Filters.command, handle_pending_actions))
     dp.add_handler(CallbackQueryHandler(buy_product, pattern='^buy_\\d+$'))
     dp.add_handler(CallbackQueryHandler(view_shop, pattern='^view_shop$'))
+    dp.add_handler(CallbackQueryHandler(show_products_list, pattern='^show_products_list$'))
+    dp.add_handler(CallbackQueryHandler(product_options, pattern='^product_options_\\d+$'))
+    dp.add_handler(CallbackQueryHandler(download_file, pattern='^download_\\d+$'))
+    dp.add_handler(CallbackQueryHandler(delete_product, pattern='^delete_\\d+$'))
+    dp.add_handler(CallbackQueryHandler(confirm_delete_product, pattern='^confirm_delete_\\d+$'))
+    dp.add_handler(CallbackQueryHandler(copy_btc_address, pattern='^copy_btc_address$'))
     dp.add_handler(CallbackQueryHandler(add_product, pattern='^add_product$'))
     dp.add_handler(CallbackQueryHandler(confirm_purchase, pattern='^confirm_\\d+$'))
     dp.add_handler(CallbackQueryHandler(show_deposit_menu, pattern='^deposit$'))
