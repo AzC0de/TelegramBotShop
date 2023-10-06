@@ -9,7 +9,7 @@ import threading
 import yaml
 
 def read_yaml_config(filename):
-    with open(filename, 'r') as file:
+    with open(filename, 'r', encoding='utf-8') as file:
         return yaml.safe_load(file)
 
 config = read_yaml_config('config.yml')
