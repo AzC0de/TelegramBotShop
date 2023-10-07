@@ -9,7 +9,7 @@ import threading
 import yaml
 
 def read_yaml_config(filename):
-    with open(filename, 'r', encoding='utf-8') as file:
+    with open(filename, 'r') as file:
         return yaml.safe_load(file)
 
 config = read_yaml_config('config.yml')
@@ -74,7 +74,7 @@ def view_shop(update: Update, context: CallbackContext) -> None:
     user_id = query.message.chat_id
     products = fetch_products()
     if products:
-        keyboard = [[InlineKeyboardButton(f"{name} - ${price}", callback_data=f'buy_{id}') for id, name, price in products]]
+        keyboard = [[InlineKeyboardButton(f"{name} - ${price}", callback_data=f'buy_{id}')] for id, name, price in products]
         keyboard.append([InlineKeyboardButton(config['buttons']['back_to_main_menu'], callback_data='main_menu')])
         markup = InlineKeyboardMarkup(keyboard)
         
@@ -85,6 +85,7 @@ def view_shop(update: Update, context: CallbackContext) -> None:
         markup = InlineKeyboardMarkup(keyboard)
         if query.message.text != config['messages']['no_products_available']:
             query.edit_message_text(config['messages']['no_products_available'], reply_markup=markup)
+
 
 def add_product(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
